@@ -1,0 +1,266 @@
+================================================================================
+  RECOMMENDER ALGORITHMS — COMPONENT BREAKDOWN
+  Project: smart-travel-packing / recommender.py
+  Date: 2026-04-02
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+OVERVIEW
+────────────────────────────────────────────────────────────────────────────────
+
+Task        : Multi-label binary classification — predict which of 37
+              clothing/packing items to recommend for a given day
+Input       : 10 features (temp_avg, temp_min, temp_max, log_precip,
+              wind_speed, uv_index, cloud_cover, is_snow, is_thunder,
+              purpose_enc)
+Output      : 37 binary labels (1 = include item, 0 = exclude)
+Training    : 15,000 synthetic samples generated from _rule_labels() + 3%
+              random label noise for smooth decision boundaries
+Persistence : joblib files under model/ (one per ML model type)
+
+
+────────────────────────────────────────────────────────────────────────────────
+ALGORITHM COMPARISON TABLE
+────────────────────────────────────────────────────────────────────────────────
+
+  ┌───────────────┬────────────────────────────────────┬────────────────────────────────────┬───────────────────────────────────────┐
+  │    --model    │            Algorithm               │          How it works              │       Key difference from lgbm        │
+  ├───────────────┼────────────────────────────────────┼────────────────────────────────────┼───────────────────────────────────────┤
+  │               │ MultiOutputClassifier              │ 200 trees built sequentially;      │                                       │
+  │ lgbm          │ (LGBMClassifier)                   │ each tree corrects errors of       │ — (this is the default)               │
+  │ (default)     │ Gradient Boosting                  │ the previous via gradient descent  │                                       │
+  ├───────────────┼────────────────────────────────────┼────────────────────────────────────┼───────────────────────────────────────┤
+  │               │ MultiOutputClassifier              │ 200 decision trees trained         │ Builds trees independently vs. lgbm's │
+  │ random_forest │ (RandomForestClassifier)           │ in parallel (bagging);             │ sequential boosting. More robust to   │
+  │               │ Bagging Ensemble                   │ majority vote                      │ label noise, no learning rate to tune │
+  ├───────────────┼────────────────────────────────────┼────────────────────────────────────┼───────────────────────────────────────┤
+  │               │ MultiOutputClassifier              │ Finds 15 most similar weather      │ No "learning" — just stores 15k       │
+  │ knn           │ (KNeighborsClassifier)             │ conditions in training data,       │ samples and measures Euclidean        │
+  │               │ Instance-based                     │ votes by distance                  │ distance at query time. Slower per    │
+  │               │                                    │                                    │ call                                  │
+  ├───────────────┼────────────────────────────────────┼────────────────────────────────────┼───────────────────────────────────────┤
+  │               │                                    │ Calls the rule function            │ Instant, deterministic, no model      │
+  │ rules         │ Direct _rule_labels()              │ directly, zero ML                  │ file. This is the ground truth all    │
+  │               │ Expert System                      │                                    │ ML models were trained to approximate │
+  └───────────────┴────────────────────────────────────┴────────────────────────────────────┴───────────────────────────────────────┘
+
+
+────────────────────────────────────────────────────────────────────────────────
+1. lgbm  (DEFAULT)
+   LightGBM — Gradient Boosting (MultiOutputClassifier)
+────────────────────────────────────────────────────────────────────────────────
+
+SUMMARY
+  Builds 200 decision trees sequentially. Each tree focuses on correcting the
+  residual errors of all previous trees via gradient descent on a loss function.
+  The best-performing algorithm on tabular data with well-engineered features.
+
+COMPONENT BREAKDOWN
+  ┌──────────────────────────┬──────────────────────────────────────────────────────┬────────────────────────────────────┐
+  │ Component                │ What it is                                           │ Academic Field                     │
+  ├──────────────────────────┼──────────────────────────────────────────────────────┼────────────────────────────────────┤
+  │ Gradient Boosting        │ Iteratively fits new trees to the negative gradient  │ Machine Learning —                 │
+  │                          │ of the loss (residual errors); each tree corrects    │ Ensemble / Boosting                │
+  │                          │ the mistakes of previous trees                       │ (Friedman, 2001)                   │
+  ├──────────────────────────┼──────────────────────────────────────────────────────┼────────────────────────────────────┤
+  │ Leaf-wise tree growth    │ LightGBM splits the leaf with max gain at each step  │ ML Engineering —                   │
+  │                          │ (vs. level-wise in XGBoost); faster and more         │ LightGBM (Microsoft, 2017)         │
+  │                          │ accurate for same n_leaves                           │                                    │
+  ├──────────────────────────┼──────────────────────────────────────────────────────┼────────────────────────────────────┤
+  │ MultiOutputClassifier    │ sklearn wrapper that trains one independent           │ Machine Learning —                 │
+  │                          │ LGBMClassifier per label (37 total)                  │ Multi-label Classification         │
+  ├──────────────────────────┼──────────────────────────────────────────────────────┼────────────────────────────────────┤
+  │ Learning rate (0.05)     │ Shrinks each tree's contribution; smaller =          │ Numerical Optimization —           │
+  │                          │ slower but more robust training                      │ Gradient Descent                   │
+  ├──────────────────────────┼──────────────────────────────────────────────────────┼────────────────────────────────────┤
+  │ num_leaves=31            │ Controls model complexity per tree; 31 is the        │ ML Hyperparameter                  │
+  │                          │ LightGBM default, balances fit vs. overfit           │                                    │
+  ├──────────────────────────┼──────────────────────────────────────────────────────┼────────────────────────────────────┤
+  │ min_child_samples=20     │ Minimum samples in a leaf; prevents overfitting      │ Regularization                     │
+  │                          │ to noise in small leaf nodes                         │                                    │
+  └──────────────────────────┴──────────────────────────────────────────────────────┴────────────────────────────────────┘
+
+KEY PARAMETERS
+  n_estimators    = 200    (number of trees)
+  max_depth       = 6      (max tree depth)
+  learning_rate   = 0.05   (shrinkage)
+  num_leaves      = 31     (complexity per tree)
+  min_child_samples = 20   (minimum leaf size)
+
+MODEL FILE   : model/recommender.joblib
+CLASSIFICATION
+  Field     : Machine Learning → Supervised Learning → Ensemble → Boosting
+  Learned?  : Yes — parameters learned from 15k synthetic training samples
+  Is it ML? : Yes
+  Suggested : YES — best choice for this use case
+
+
+────────────────────────────────────────────────────────────────────────────────
+2. random_forest
+   Random Forest — Bagging Ensemble (MultiOutputClassifier)
+────────────────────────────────────────────────────────────────────────────────
+
+SUMMARY
+  Builds 200 decision trees independently in parallel, each on a random
+  bootstrap sample of the training data and random subset of features.
+  Final prediction is a majority vote across all trees.
+
+COMPONENT BREAKDOWN
+  ┌──────────────────────────┬──────────────────────────────────────────────────────┬────────────────────────────────────┐
+  │ Component                │ What it is                                           │ Academic Field                     │
+  ├──────────────────────────┼──────────────────────────────────────────────────────┼────────────────────────────────────┤
+  │ Bagging                  │ Each tree trained on a bootstrap sample (random      │ Machine Learning —                 │
+  │ (Bootstrap Aggregating)  │ sample with replacement); reduces variance by        │ Ensemble / Bagging                 │
+  │                          │ averaging independent models                         │ (Breiman, 1996)                    │
+  ├──────────────────────────┼──────────────────────────────────────────────────────┼────────────────────────────────────┤
+  │ Feature randomness       │ Each split considers only a random subset of         │ Machine Learning —                 │
+  │                          │ features (sqrt(n_features) by default); decorrelates │ Random Forest (Breiman, 2001)      │
+  │                          │ trees so ensemble variance is further reduced        │                                    │
+  ├──────────────────────────┼──────────────────────────────────────────────────────┼────────────────────────────────────┤
+  │ Majority vote            │ Final label = 1 if majority of 200 trees predict 1  │ Statistics — Voting / Aggregation  │
+  ├──────────────────────────┼──────────────────────────────────────────────────────┼────────────────────────────────────┤
+  │ MultiOutputClassifier    │ sklearn wrapper that trains one independent           │ Machine Learning —                 │
+  │                          │ RandomForestClassifier per label (37 total)          │ Multi-label Classification         │
+  ├──────────────────────────┼──────────────────────────────────────────────────────┼────────────────────────────────────┤
+  │ min_samples_leaf=10      │ Minimum samples per leaf; absorbs the 3% label       │ Regularization                     │
+  │                          │ noise without memorising it                          │                                    │
+  └──────────────────────────┴──────────────────────────────────────────────────────┴────────────────────────────────────┘
+
+KEY PARAMETERS
+  n_estimators      = 200   (number of trees)
+  max_depth         = 12    (max tree depth)
+  min_samples_leaf  = 10    (minimum leaf size)
+  random_state      = 42    (reproducibility)
+
+MODEL FILE   : model/recommender_random_forest.joblib
+CLASSIFICATION
+  Field     : Machine Learning → Supervised Learning → Ensemble → Bagging
+  Learned?  : Yes — parameters learned from 15k synthetic training samples
+  Is it ML? : Yes
+  Suggested : Second best — solid alternative, no learning rate to tune
+
+
+────────────────────────────────────────────────────────────────────────────────
+3. knn
+   K-Nearest Neighbors — Instance-based / Lazy Learning (MultiOutputClassifier)
+────────────────────────────────────────────────────────────────────────────────
+
+SUMMARY
+  Stores the entire training set. At query time, finds the 15 most similar
+  weather conditions by Euclidean distance and votes by inverse distance
+  weighting. No explicit training step — the data IS the model.
+
+COMPONENT BREAKDOWN
+  ┌──────────────────────────┬──────────────────────────────────────────────────────┬────────────────────────────────────┐
+  │ Component                │ What it is                                           │ Academic Field                     │
+  ├──────────────────────────┼──────────────────────────────────────────────────────┼────────────────────────────────────┤
+  │ Euclidean distance       │ Measures similarity between query weather and each   │ Geometry / Linear Algebra          │
+  │                          │ of 15,000 training samples across all 10 features    │                                    │
+  ├──────────────────────────┼──────────────────────────────────────────────────────┼────────────────────────────────────┤
+  │ k=15 neighbors           │ Votes from 15 nearest samples; higher k = smoother  │ Machine Learning —                 │
+  │                          │ boundaries but less sensitive to local patterns      │ KNN (Fix & Hodges, 1951)           │
+  ├──────────────────────────┼──────────────────────────────────────────────────────┼────────────────────────────────────┤
+  │ Distance weighting       │ Closer neighbors vote more strongly                  │ Statistics — Weighted Voting       │
+  │ (weights="distance")     │ (weight = 1/distance); reduces influence of          │                                    │
+  │                          │ farther, less-similar samples                        │                                    │
+  ├──────────────────────────┼──────────────────────────────────────────────────────┼────────────────────────────────────┤
+  │ Lazy learning            │ No training phase — fit() just stores training data; │ Machine Learning —                 │
+  │                          │ all computation happens at predict() time            │ Instance-based Learning            │
+  ├──────────────────────────┼──────────────────────────────────────────────────────┼────────────────────────────────────┤
+  │ MultiOutputClassifier    │ sklearn wrapper that runs 37 independent KNN         │ Machine Learning —                 │
+  │                          │ classifiers, one per label                           │ Multi-label Classification         │
+  └──────────────────────────┴──────────────────────────────────────────────────────┴────────────────────────────────────┘
+
+KEY PARAMETERS
+  n_neighbors = 15           (number of neighbors to vote)
+  weights     = "distance"   (inverse distance weighting)
+  metric      = "euclidean"  (distance function)
+
+MODEL FILE   : model/recommender_knn.joblib  (stores full 15k training matrix)
+CLASSIFICATION
+  Field     : Machine Learning → Supervised Learning → Instance-based / Lazy
+  Learned?  : Weakly — no parameters learned; memorizes training data
+  Is it ML? : Yes (weakly)
+  Suggested : Not recommended — slower inference, contaminated by label noise
+
+
+────────────────────────────────────────────────────────────────────────────────
+4. rules
+   Direct Rule Evaluation — Expert System
+────────────────────────────────────────────────────────────────────────────────
+
+SUMMARY
+  Calls _rule_labels() directly with the extracted features. No ML, no model
+  file, no training. A human expert encoded clothing/packing logic as explicit
+  if-then rules. The ground truth that all ML models were trained to approximate.
+
+COMPONENT BREAKDOWN
+  ┌──────────────────────────┬──────────────────────────────────────────────────────┬────────────────────────────────────┐
+  │ Component                │ What it is                                           │ Academic Field                     │
+  ├──────────────────────────┼──────────────────────────────────────────────────────┼────────────────────────────────────┤
+  │ Temperature thresholds   │ if temp_avg < 5 → heavy coat; elif < 10 → warm       │ Knowledge Engineering —            │
+  │                          │ sweater; etc. — explicit layering rules              │ Expert Systems / Rule-based AI     │
+  ├──────────────────────────┼──────────────────────────────────────────────────────┼────────────────────────────────────┤
+  │ Precipitation rules      │ if precip > 20mm → waterproof jacket + umbrella;     │ Knowledge Engineering              │
+  │                          │ elif > 1mm → umbrella only                           │                                    │
+  ├──────────────────────────┼──────────────────────────────────────────────────────┼────────────────────────────────────┤
+  │ UV rules                 │ if eff_uv > 6 → SPF 50+, sunglasses, wide-brim hat; │ Knowledge Engineering              │
+  │                          │ elif > 3 → SPF 30+, sunglasses                      │                                    │
+  ├──────────────────────────┼──────────────────────────────────────────────────────┼────────────────────────────────────┤
+  │ Trip purpose rules       │ business → business attire, laptop bag, power        │ Knowledge Engineering              │
+  │                          │ adapter; tourism → walking shoes, day backpack; etc. │                                    │
+  ├──────────────────────────┼──────────────────────────────────────────────────────┼────────────────────────────────────┤
+  │ Hard thresholds          │ All decisions are binary step functions — no         │ Boolean Logic                      │
+  │                          │ gradual transitions between boundary values          │                                    │
+  └──────────────────────────┴──────────────────────────────────────────────────────┴────────────────────────────────────┘
+
+KEY PARAMETERS
+  None — all logic is hand-coded constants in _rule_labels()
+
+MODEL FILE   : None (no file needed)
+CLASSIFICATION
+  Field     : Classical AI → Knowledge Engineering → Expert Systems / Rule-based
+  Learned?  : No — rules written by hand
+  Is it ML? : No
+  Suggested : Use for debugging/development only — hard cutoffs, no smooth
+              transitions between threshold boundaries
+
+
+================================================================================
+  ACADEMIC CLASSIFICATION SUMMARY
+================================================================================
+
+  ┌───────────────┬──────────────────────────────────────┬──────────────┬───────────────┬────────────┐
+  │    --model    │               Field                  │  Learned     │    Is ML?     │ Suggested? │
+  │               │                                      │  from data?  │               │            │
+  ├───────────────┼──────────────────────────────────────┼──────────────┼───────────────┼────────────┤
+  │ lgbm          │ ML → Supervised → Ensemble →         │ Yes          │ Yes           │ YES        │
+  │ (default)     │ Gradient Boosting                    │              │               │ (best)     │
+  ├───────────────┼──────────────────────────────────────┼──────────────┼───────────────┼────────────┤
+  │ random_forest │ ML → Supervised → Ensemble → Bagging │ Yes          │ Yes           │ 2nd best   │
+  ├───────────────┼──────────────────────────────────────┼──────────────┼───────────────┼────────────┤
+  │ knn           │ ML → Supervised → Instance-based /   │ Weakly       │ Yes (weakly)  │ No         │
+  │               │ Lazy Learning                        │ (memorizes)  │               │            │
+  ├───────────────┼──────────────────────────────────────┼──────────────┼───────────────┼────────────┤
+  │ rules         │ Classical AI → Knowledge Engineering │ No           │ No            │ Debug only │
+  │               │ → Expert Systems                     │              │               │            │
+  └───────────────┴──────────────────────────────────────┴──────────────┴───────────────┴────────────┘
+
+
+================================================================================
+  RECOMMENDATION
+================================================================================
+
+  Use lgbm (default) for production.
+  Use rules during development to verify _rule_labels() changes before
+  retraining ML models.
+
+  To switch algorithm:
+    python main.py --city "Tokyo" --start 2026-07-10 --end 2026-07-15
+                   --purpose tourism --model random_forest
+
+  To retrain a specific model:
+    python main.py --retrain --model random_forest
+
+================================================================================

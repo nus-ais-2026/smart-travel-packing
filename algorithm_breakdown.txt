@@ -1,0 +1,314 @@
+================================================================================
+  WEATHER PREDICTION ALGORITHMS — COMPONENT BREAKDOWN
+  Project: smart-travel-packing / historical_forecast.py
+  Date: 2026-04-02
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+1. ewm_ols
+   Exponential Weighted Mean + Ordinary Least Squares Trend
+────────────────────────────────────────────────────────────────────────────────
+
+SUMMARY
+  A hand-crafted statistical estimator combining a recency-biased average with
+  a linear trend, blended adaptively based on how reliable the trend signal is.
+
+COMPONENT BREAKDOWN
+  ┌──────────────────────────────┬────────────────────────────────────────────────────────┬─────────────────────────────────────────┐
+  │ Component                    │ What it is                                             │ Academic Field                          │
+  ├──────────────────────────────┼────────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ Exponential Weighted Mean    │ Assigns weight w = 0.85^n to each year; most recent    │ Time Series Analysis /                  │
+  │ (EWM, alpha=0.85)            │ year gets highest weight, older years decay            │ Signal Processing                       │
+  ├──────────────────────────────┼────────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ OLS Linear Trend             │ Fits a straight line to (year, value) pairs by         │ Classical Statistics —                  │
+  │ via np.polyfit               │ minimizing sum of squared errors; extrapolates slope   │ Linear Regression (Gauss/Legendre 1800s)│
+  │                              │ to target year                                         │                                         │
+  ├──────────────────────────────┼────────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ Velocity Clipping            │ Slope is clamped to [-2*std, +2*std] to prevent        │ Heuristic Engineering                   │
+  │                              │ extreme extrapolation from noisy data                  │                                         │
+  ├──────────────────────────────┼────────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ Trend Reliability Score      │ trend_signal / (trend_signal + sigma_w); measures      │ Signal Processing —                     │
+  │                              │ signal-to-noise ratio of the trend                     │ SNR (Signal-to-Noise Ratio)             │
+  ├──────────────────────────────┼────────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ Adaptive Blend               │ (1 - eff_tw) * mean + eff_tw * trend; reduces trend    │ Heuristic Engineering                   │
+  │                              │ weight when data variability >> trend signal            │                                         │
+  └──────────────────────────────┴────────────────────────────────────────────────────────┴─────────────────────────────────────────┘
+
+FORMULA (simplified)
+  weights     = 0.85^[0,1,2,...,n-1]  (normalized)
+  mu_w        = weighted_mean(values, weights)
+  sigma_w     = weighted_std(values, weights)
+  slope       = OLS slope of (years, values), clipped to [-2*std, +2*std]
+  reliability = |slope*5| / (|slope*5| + sigma_w)
+  eff_tw      = 0.25 * min(1.0, reliability)
+  result      = (1 - eff_tw) * mu_w  +  eff_tw * (intercept + slope * target_year)
+
+KEY PARAMETERS
+  ALPHA        = 0.85   (exponential decay rate — set by hand)
+  TREND_WEIGHT = 0.25   (max fraction trend can contribute — set by hand)
+
+CLASSIFICATION
+  Field        : Classical Statistics + Time Series Analysis
+                 Applied to: Statistical Climatology
+  Learned from data? : NO — all parameters are hand-set constants
+  Is it ML?    : NO
+  Is it AI/Reasoning? : NO
+
+
+────────────────────────────────────────────────────────────────────────────────
+2. holt_des
+   Holt's Double Exponential Smoothing
+────────────────────────────────────────────────────────────────────────────────
+
+SUMMARY
+  A formal time-series method that decomposes observations into two state
+  variables — level and trend — each smoothed with its own decay parameter.
+  Proposed by Charles Holt (1957). More principled than ewm_ols for
+  level+trend decomposition; the closest algorithmic relative to the default.
+
+COMPONENT BREAKDOWN
+  ┌──────────────────────────────┬────────────────────────────────────────────────────────┬─────────────────────────────────────────┐
+  │ Component                    │ What it is                                             │ Academic Field                          │
+  ├──────────────────────────────┼────────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ Level state L                │ Smoothed estimate of the current value at each year:   │ Time Series Analysis —                  │
+  │ (alpha=0.85)                 │ L = alpha*y + (1-alpha)*(L_prev + T_prev)              │ Exponential Smoothing                   │
+  ├──────────────────────────────┼────────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ Trend state T                │ Smoothed estimate of the slope at each year:           │ Time Series Analysis —                  │
+  │ (beta=0.15)                  │ T = beta*(L - L_prev) + (1-beta)*T_prev                │ Holt Linear Method (1957)               │
+  ├──────────────────────────────┼────────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ Two-pass / chronological     │ Years are reversed from most-recent-first to           │ Signal Processing —                     │
+  │ forward pass                 │ oldest-first before running the recurrence             │ Recursive / causal filter               │
+  ├──────────────────────────────┼────────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ Linear forecast              │ h steps ahead: L + h * T                               │ Classical Statistics —                  │
+  │                              │ where h = target_year - last_observed_year             │ Linear extrapolation                    │
+  └──────────────────────────────┴────────────────────────────────────────────────────────┴─────────────────────────────────────────┘
+
+FORMULA
+  Initialize:
+    L = v[0]   (oldest value)
+    T = v[1] - v[0]   (first difference as seed)
+
+  For each subsequent value v[i]:
+    L_new = alpha * v[i] + (1 - alpha) * (L + T)
+    T_new = beta  * (L_new - L) + (1 - beta) * T
+    L, T  = L_new, T_new
+
+  Forecast:
+    result = L + h * T   where h = target_year - last_observed_year
+
+KEY PARAMETERS
+  alpha = 0.85   (level smoothing — set by hand, same as ewm_ols ALPHA)
+  beta  = 0.15   (trend smoothing — low value = slow-moving climate trend)
+
+DIFFERENCE FROM ewm_ols
+  ewm_ols computes level and trend independently then blends them with a
+  hand-crafted SNR formula. holt_des couples level and trend inside the same
+  recurrence — each level update uses the current trend, each trend update
+  uses the current level change. This coupling is the formal, theoretically
+  correct approach.
+
+CLASSIFICATION
+  Field        : Time Series Analysis (Holt-Winters family)
+  Learned from data? : NO — alpha and beta are hand-set constants
+  Is it ML?    : NO
+  Is it AI/Reasoning? : NO
+
+
+────────────────────────────────────────────────────────────────────────────────
+3. theil_sen  (DEFAULT)
+   Theil-Sen Estimator (Non-parametric Robust Linear Regression)
+────────────────────────────────────────────────────────────────────────────────
+
+SUMMARY
+  Computes the slope as the median of all pairwise slopes between data points,
+  making it highly resistant to outlier years (e.g. El Nino, volcanic winters).
+  Up to ~29% of observations can be extreme outliers without distorting the
+  result. Proposed by Henri Theil (1950) and Pranab Sen (1968).
+
+COMPONENT BREAKDOWN
+  ┌──────────────────────────────┬────────────────────────────────────────────────────────┬─────────────────────────────────────────┐
+  │ Component                    │ What it is                                             │ Academic Field                          │
+  ├──────────────────────────────┼────────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ Pairwise slopes              │ For every pair (i, j): slope_ij = (v[j]-v[i]) /        │ Non-parametric Statistics               │
+  │                              │ (year[j]-year[i]); with n years → n*(n-1)/2 slopes     │                                         │
+  ├──────────────────────────────┼────────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ Median slope                 │ Final slope = median of all pairwise slopes             │ Robust Statistics —                     │
+  │                              │ (NOT mean — immune to outlier pairs)                   │ Theil (1950), Sen (1968)                │
+  ├──────────────────────────────┼────────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ Median intercept             │ intercept = median(values) - slope * median(years)     │ Robust Statistics                       │
+  ├──────────────────────────────┼────────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ Linear prediction            │ result = intercept + slope * target_year               │ Classical Statistics —                  │
+  │                              │                                                        │ Linear regression                       │
+  └──────────────────────────────┴────────────────────────────────────────────────────────┴─────────────────────────────────────────┘
+
+FORMULA
+  slopes = [ (v[j] - v[i]) / (year[j] - year[i])
+             for all pairs i < j where year[j] != year[i] ]
+
+  slope     = median(slopes)
+  intercept = median(values) - slope * median(years)
+  result    = intercept + slope * target_year
+
+KEY PARAMETERS
+  None — entirely data-driven, no hand-set constants.
+
+DIFFERENCE FROM ewm_ols / OLS
+  OLS minimizes sum of squared errors → one extreme year pulls the slope
+  strongly (squaring amplifies outliers). Theil-Sen uses median → a single
+  extreme year only contributes one pairwise slope among many, so it cannot
+  dominate. This is critical for climate data where anomalous years are common.
+
+CLASSIFICATION
+  Field        : Robust Statistics / Non-parametric Statistics
+  Learned from data? : NO — the slope is derived deterministically from
+                       the data with no free parameters
+  Is it ML?    : NO
+  Is it AI/Reasoning? : NO
+
+
+────────────────────────────────────────────────────────────────────────────────
+4. gpr
+   Gaussian Process Regression
+────────────────────────────────────────────────────────────────────────────────
+
+SUMMARY
+  Places a probabilistic prior over all possible functions (via a kernel),
+  then updates it with observed historical years to produce a posterior mean
+  prediction at the target year. The kernel hyperparameters (length_scale,
+  noise_level) are optimized from the data via maximum likelihood.
+  The only method here that partially learns from data.
+
+COMPONENT BREAKDOWN
+  ┌──────────────────────────────┬────────────────────────────────────────────────────────┬─────────────────────────────────────────┐
+  │ Component                    │ What it is                                             │ Academic Field                          │
+  ├──────────────────────────────┼────────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ GP Prior                     │ A distribution over all possible functions shaped by   │ Bayesian Statistics —                   │
+  │                              │ the kernel; encodes the belief that nearby years       │ Gaussian Processes                      │
+  │                              │ should have similar values                             │ (Rasmussen & Williams, 2006)            │
+  ├──────────────────────────────┼────────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ Matern kernel (nu=1.5)       │ Covariance function: defines how similar two years     │ Bayesian ML / Kernel Methods            │
+  │                              │ are by their distance; nu=1.5 assumes the function is  │                                         │
+  │                              │ once-differentiable (realistic for climate trends)     │                                         │
+  ├──────────────────────────────┼────────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ WhiteKernel                  │ Additive noise term in the kernel; absorbs             │ Probabilistic ML                        │
+  │ (noise_level=1.0)            │ year-to-year climate variability so GPR does not       │                                         │
+  │                              │ interpolate through every point exactly                │                                         │
+  ├──────────────────────────────┼────────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ Kernel hyperparameter        │ length_scale and noise_level are optimized by          │ ML / Numerical Optimization             │
+  │ optimization                 │ maximizing the log marginal likelihood of the data;    │                                         │
+  │ (n_restarts=3)               │ 3 restarts avoid local minima                          │                                         │
+  ├──────────────────────────────┼────────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ Posterior mean               │ After conditioning on observed years, the GP returns   │ Bayesian Inference                      │
+  │                              │ the most likely function value at target_year           │                                         │
+  ├──────────────────────────────┼────────────────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ normalize_y=True             │ Centers and scales targets before fitting to avoid     │ ML Engineering /                        │
+  │                              │ numerical instability with small datasets              │ Numerical Methods                       │
+  └──────────────────────────────┴────────────────────────────────────────────────────────┴─────────────────────────────────────────┘
+
+FORMULA (conceptual)
+  kernel     = Matern(length_scale=5.0, nu=1.5) + WhiteKernel(noise_level=1.0)
+  prior      = GP(mean=0, covariance=kernel)
+  posterior  = prior conditioned on observed (years, values)
+  result     = posterior.mean(target_year)
+
+  Internally:
+    K    = kernel(X, X)                     # n x n covariance matrix of training points
+    K_s  = kernel(X, target_year)           # n x 1 covariance with prediction point
+    mean = K_s.T @ inv(K + noise*I) @ y     # posterior mean prediction
+
+KEY PARAMETERS
+  length_scale = 5.0   (initial; optimized from data — controls smoothness)
+  noise_level  = 1.0   (initial; optimized from data — controls noise tolerance)
+  n_restarts   = 3     (number of optimizer restarts — engineering choice)
+
+DIFFERENCE FROM OTHERS
+  GPR is the only method that automatically adapts its hyperparameters to the
+  data. All other methods (ewm_ols, holt_des, theil_sen) use fixed constants.
+  GPR also provides a confidence interval (std) for free, which the others do
+  not. Trade-off: ~5-15 ms per variable per day vs ~1-10 µs for the others.
+
+CLASSIFICATION
+  Field        : Probabilistic ML / Bayesian ML / Kernel Methods
+  Learned from data? : PARTIALLY — kernel hyperparameters are optimized via
+                       maximum likelihood on each call (not a trained model
+                       in the deep learning sense; no separate training set)
+  Is it ML?    : YES (partially)
+  Is it AI/Reasoning? : NO
+
+
+================================================================================
+  SIDE-BY-SIDE COMPARISON
+================================================================================
+
+  ┌─────────────┬──────────────────────────────────┬──────────────────────────────────┬──────────────┬──────────────┐
+  │ Method      │ Core Idea                        │ Field                            │ Learned from │ Speed        │
+  │             │                                  │                                  │ data?        │              │
+  ├─────────────┼──────────────────────────────────┼──────────────────────────────────┼──────────────┼──────────────┤
+  │ ewm_ols     │ Weighted mean + OLS trend        │ Classical Statistics /            │ No           │ ~1 µs        │
+  │             │ blended by SNR confidence        │ Time Series Analysis             │              │              │
+  ├─────────────┼──────────────────────────────────┼──────────────────────────────────┼──────────────┼──────────────┤
+  │ holt_des    │ Recursive level + trend states   │ Time Series Analysis             │ No           │ ~1 µs        │
+  │             │ with separate decay params       │ (Holt-Winters family)            │              │              │
+  ├─────────────┼──────────────────────────────────┼──────────────────────────────────┼──────────────┼──────────────┤
+  │ theil_sen   │ Median of all pairwise slopes    │ Robust / Non-parametric          │ No           │ ~10 µs       │
+  │ (DEFAULT)   │ — outlier-resistant              │ Statistics                       │              │              │
+  ├─────────────┼──────────────────────────────────┼──────────────────────────────────┼──────────────┼──────────────┤
+  │ gpr         │ Bayesian posterior over          │ Probabilistic / Bayesian ML      │ Partially    │ ~5-15 ms     │
+  │             │ functions via kernel             │ / Kernel Methods                 │ (kernel HPs) │              │
+  └─────────────┴──────────────────────────────────┴──────────────────────────────────┴──────────────┴──────────────┘
+
+  All four methods:
+    - Use the same input: ~5-15 historical yearly observations
+    - Predict the same output: a single scalar for the target year
+    - Are applied per-variable (temp_max, temp_min, precip, wind, cloud, uv)
+    - Do NOT affect weather_code prediction (always uses exponential weighted mode)
+
+
+================================================================================
+Recommendation: theil_sen
+
+  Here's why, specific to this project's situation:
+
+  ---
+  The Key Problem With Climate Data
+
+  Historical climate data always contains outlier years — El Niño events,
+  volcanic winters, extreme droughts. These are real but exceptional, and you
+  don't want them distorting a general travel prediction.
+
+  - ewm_ols and holt_des both use OLS or OLS-like slope estimation — one
+    extreme year can pull the slope significantly because squaring errors
+    amplifies them
+  - theil_sen uses the median of pairwise slopes — one bad year only
+    contributes a few data points among many, so it cannot dominate
+
+  ---
+  Head-to-Head for This Use Case
+
+  ┌────────────────────────────┬─────────┬──────────┬────────────┬───────────┐
+  │          Criteria          │ ewm_ols │ holt_des │ theil_sen  │    gpr    │
+  ├────────────────────────────┼─────────┼──────────┼────────────┼───────────┤
+  │ Outlier-resistant          │ No      │ No       │ Yes        │ Moderate  │
+  ├────────────────────────────┼─────────┼──────────┼────────────┼───────────┤
+  │ Speed                      │ ~1 µs   │ ~1 µs    │ ~10 µs     │ ~5-15 ms  │
+  ├────────────────────────────┼─────────┼──────────┼────────────┼───────────┤
+  │ Hand-set parameters        │ Yes (2) │ Yes (2)  │ None       │ Partial   │
+  ├────────────────────────────┼─────────┼──────────┼────────────┼───────────┤
+  │ Extra dependency           │ No      │ No       │ No         │ sklearn   │
+  ├────────────────────────────┼─────────┼──────────┼────────────┼───────────┤
+  │ Suited to ~10 observations │ Yes     │ Yes      │ Yes        │ Overkill  │
+  ├────────────────────────────┼─────────┼──────────┼────────────┼───────────┤
+  │ Improvement over default   │ —       │ Marginal │ Meaningful │ Uncertain │
+  └────────────────────────────┴─────────┴──────────┴────────────┴───────────┘
+
+  ---
+  Why Not the Others
+
+  - holt_des — more principled than ewm_ols but barely different in practice
+    with only 10 data points and h=1 year forecast horizon.
+  - gpr — designed for non-linear trends; with only 10 observations it has
+    too little data to express that advantage, and the 5-15 ms per variable
+    per day adds real latency (~90 ms for a 10-day trip x 6 variables).
+
+================================================================================
